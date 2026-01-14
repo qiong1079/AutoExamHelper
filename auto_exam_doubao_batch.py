@@ -9,18 +9,51 @@ import traceback
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver import ActionChains
-from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.service import Service  # 必须导入 Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException, \
-    JavascriptException
-from webdriver_manager.chrome import ChromeDriverManager
+    JavascriptException, SessionNotCreatedException  # 添加新异常类型
+# --- 移除 webdriver-manager 相关导入 ---
+# from webdriver_manager.chrome import ChromeDriverManager
+# --- END 移除 webdriver-manager 相关导入 ---
 from queue import Queue
 import os
 import tkinter as tk
 from tkinter import ttk, messagebox
 import ctypes
+import subprocess
+
+# ===================== 提前设置环境变量（核心修复：解决下载路径问题） =====================
+# 1. 国内镜像源（优先）
+# os.environ['CHROMEDRIVER_CDNURL'] = 'https://registry.npmmirror.com/-/binary/chromedriver/'
+# 2. 禁用自动更新
+# os.environ['WDM_LOCAL'] = '1'
+# 3. 缓存路径改为用户目录（避免短路径/权限问题）
+# CHROME_DRIVER_CACHE = os.path.join(os.path.expanduser("～"), "AutoExam", "chromedriver")
+# os.environ['WDM_CACHE_DIR'] = CHROME_DRIVER_CACHE
+# 注释掉上面这3行，让 webdriver-manager 使用默认缓存目录
+
+# ===================== 新增：基础日志配置（解决初始化依赖问题） =====================
+# 先初始化一个临时的基础日志，用于目录创建等早期操作
+def init_basic_logger():
+    basic_logger = logging.getLogger("BasicInit")
+    basic_logger.setLevel(logging.INFO)
+    basic_logger.handlers.clear()
+
+    # 控制台输出
+    console_handler = logging.StreamHandler()
+    console_formatter = logging.Formatter(
+        "%(asctime)s - %(levelname)s - %(message)s",
+        datefmt="%H:%M:%S"
+    )
+    console_handler.setFormatter(console_formatter)
+    basic_logger.addHandler(console_handler)
+    return basic_logger
+
+
+basic_logger = init_basic_logger()
 
 # ===================== 新增：禁用InsecureRequestWarning警告 =====================
 import urllib3
@@ -64,9 +97,81 @@ API_CONFIG = {
     "proxy": None
 }
 
-# 国内镜像源
-os.environ['CHROMEDRIVER_CDNURL'] = 'https://registry.npmmirror.com/-/binary/chromedriver/'
-os.environ['WDM_LOCAL'] = '1'
+
+# ===================== 新增：Chrome版本检测函数（核心修复） =====================
+def get_chrome_version():
+    """获取本地Chrome浏览器版本，用于匹配ChromeDriver"""
+    try:
+        # Windows系统检测
+        if sys.platform == "win32":
+            # 常见Chrome安装路径
+            chrome_paths = [
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                os.path.expanduser(r"～\AppData\Local\Google\Chrome\Application\chrome.exe")
+            ]
+            for path in chrome_paths:
+                if os.path.exists(path):
+                    result = subprocess.check_output(
+                        [path, "--version"],
+                        stderr=subprocess.STDOUT,
+                        text=True
+                    )
+                    # 提取版本号（如 Chrome 120.0.6099.109 -> 120）
+                    version_match = re.search(r'Chrome (\d+)\.', result)
+                    if version_match:
+                        return version_match.group(1)
+        # Mac/Linux系统（备用）
+        else:
+            result = subprocess.check_output(["google-chrome", "--version"], stderr=subprocess.STDOUT, text=True)
+            version_match = re.search(r'Chrome (\d+)\.', result)
+            if version_match:
+                return version_match.group(1)
+        return None
+    except Exception as e:
+        basic_logger.warning(f"检测Chrome版本失败：{e}")
+        return None
+
+
+# def get_chromedriver_paths(): # 移除此函数
+#     """获取所有可能的ChromeDriver路径（优先级排序）"""
+#     paths = []
+#     # 1. 程序同级目录
+#     current_dir = os.path.dirname(os.path.abspath(__file__))
+#     paths.append(os.path.join(current_dir, "chromedriver.exe"))
+#     # 2. 用户指定的缓存目录
+#     paths.append(os.path.join(CHROME_DRIVER_CACHE, "chromedriver.exe"))
+#     # 3. 系统环境变量路径
+#     paths.append("chromedriver.exe")
+#     # 4. 桌面路径
+#     desktop_path = os.path.join(os.path.expanduser("～"), "Desktop")
+#     paths.append(os.path.join(desktop_path, "chromedriver.exe"))
+#     return paths
+
+
+# ===================== 新增：路径检查工具（修复依赖问题） =====================
+def ensure_dir_exists(dir_path):
+    """确保目录存在，不存在则创建（解决路径不存在错误）"""
+    try:
+        # 递归创建目录，设置权限为755
+        os.makedirs(dir_path, exist_ok=True, mode=0o755)
+        # 验证目录可写
+        test_file = os.path.join(dir_path, "test_write.tmp")
+        with open(test_file, "w") as f:
+            f.write("test")
+        os.remove(test_file)
+        basic_logger.info(f"创建/验证目录成功：{dir_path}")  # 使用基础日志
+        return True
+    except PermissionError:
+        # 权限不足时，改用临时目录
+        temp_dir = os.path.join(os.environ.get("TEMP", "/tmp"), "AutoExam")
+        os.makedirs(temp_dir, exist_ok=True)
+        # os.environ['WDM_CACHE_DIR'] = temp_dir # 不再强制设置环境变量
+        basic_logger.warning(f"原目录权限不足，webdriver-manager可能使用默认缓存目录")  # 使用基础日志
+        return True
+    except Exception as e:
+        basic_logger.error(f"创建目录失败：{dir_path} - {str(e)[:30]}")  # 使用基础日志
+        return False
 
 
 # ===================== 日志初始化 =====================
@@ -75,13 +180,26 @@ def init_logger():
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
 
-    file_handler = logging.FileHandler("auto_exam_log.log", encoding="utf-8")
+    log_path = os.path.join(os.path.expanduser("～"), "AutoExam", "auto_exam_log.log")
+    ensure_dir_exists(os.path.dirname(log_path))
+
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
     file_formatter = logging.Formatter(
         "%(asctime)s - %(levelname)s - %(threadName)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
     file_handler.setFormatter(file_formatter)
     logger.addHandler(file_handler)
+
+    # 增加控制台输出（便于调试）
+    console_handler = logging.StreamHandler()
+    console_formatter = logging.Formatter(
+        "%(asctime)s - %(levelname)s - %(message)s",
+        datefmt="%H:%M:%S"
+    )
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+
     return logger
 
 
@@ -94,7 +212,15 @@ def update_status(msg, level="info"):
     global API_CONFIG
     token_msg = f"【轮次：{cycle_count} | 已用Token：{API_CONFIG['used_tokens']}/{API_CONFIG['token_limit']}】"
     full_msg = f"{token_msg} {msg}"
-    logger.info(f"【状态更新】{full_msg}")
+
+    # 根据级别写入不同日志
+    if level == "info":
+        logger.info(f"【状态更新】{full_msg}")
+    elif level == "warning":
+        logger.warning(f"【状态更新】{full_msg}")
+    elif level == "error":
+        logger.error(f"【状态更新】{full_msg}")
+
     STATUS_QUEUE.put({
         "type": "status",
         "msg": msg,
@@ -509,12 +635,12 @@ def call_doubao_api(prompt):
         except requests.exceptions.ConnectionError:
             error_msg = "连接错误（无法访问API服务器，可能需要代理）"
             update_status(f"API调用失败：{error_msg}，{retry + 1}/{API_RETRY_TIMES}", "error")
-            logger.error(f"API连接错误：{e}", exc_info=True)
+            logger.error(f"API连接错误", exc_info=True)
 
         except requests.exceptions.Timeout:
             error_msg = f"请求超时（已等待{API_TIMEOUT}秒，网络延迟过高）"
             update_status(f"API调用失败：{error_msg}，{retry + 1}/{API_RETRY_TIMES}", "error")
-            logger.error(f"API超时错误：{e}", exc_info=True)
+            logger.error(f"API超时错误", exc_info=True)
 
         except Exception as e:
             error_msg = str(e)[:50]
@@ -663,11 +789,34 @@ def return_to_exam_list(driver):
         return False
 
 
+# ===================== 新增：获取资源文件路径（用于PyInstaller打包） =====================
+def resource_path(relative_path):
+    """
+    获取资源文件的绝对路径，用于 PyInstaller 打包后访问内部文件
+    """
+    try:
+        # PyInstaller 创建临时文件夹，将路径存储在 _MEIPASS 中
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+
+# ===================== 浏览器初始化任务（核心修复：使用内置ChromeDriver） =====================
 def browser_init_task():
-    """浏览器初始化任务"""
+    """浏览器初始化任务（使用内置ChromeDriver）"""
     global driver, is_browser_ready
     try:
-        update_status("初始化浏览器...")
+        update_status("初始化浏览器（使用内置ChromeDriver）")
+
+        # 检测Chrome版本 (可选，用于日志)
+        chrome_version = get_chrome_version()
+        if chrome_version:
+            update_status(f"检测到Chrome版本：{chrome_version}")
+        else:
+            update_status("未检测到Chrome浏览器，请先安装Chrome", "warning")
+
+        # Chrome配置优化
         chrome_options = webdriver.ChromeOptions()
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
@@ -678,12 +827,29 @@ def browser_init_task():
             "profile.default_content_setting_values.notifications": 2,
             "profile.default_content_setting_values.popups": 0
         })
+        # 禁用GPU加速（解决部分Windows环境启动失败）
+        chrome_options.add_argument("--disable-gpu")
+        # 禁用沙箱（解决权限问题）
+        chrome_options.add_argument("--no-sandbox")
+        # 禁用弹窗阻止（可选）
+        chrome_options.add_argument("--disable-popup-blocking")
 
+        # ========== 核心修改：使用内置ChromeDriver ==========
+        update_status("正在获取内置ChromeDriver路径...")
+        # 获取内置的 chromedriver.exe 路径
+        driver_executable_path = resource_path("chromedriver.exe")
+        update_status(f"ChromeDriver路径: {driver_executable_path}")
+
+        # 检查驱动是否存在
+        if not os.path.exists(driver_executable_path):
+            raise FileNotFoundError(f"内置ChromeDriver未找到: {driver_executable_path}")
+
+        service = Service(executable_path=driver_executable_path)
         with DRIVER_LOCK:
-            driver = webdriver.Chrome(
-                service=Service(ChromeDriverManager().install()),
-                options=chrome_options
-            )
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+
+        # 初始化浏览器配置
+        with DRIVER_LOCK:
             driver.implicitly_wait(5)
             driver.set_page_load_timeout(WAIT_TIMEOUT)
             driver.maximize_window()
@@ -692,9 +858,35 @@ def browser_init_task():
 
         is_browser_ready = True
         update_status("浏览器已准备好，请手动登录账号（登录后请等待3秒再点击启动）")
+    except SessionNotCreatedException as sne:
+        # 这个错误通常是ChromeDriver版本与浏览器不匹配
+        update_status(f"浏览器初始化失败：{str(sne)[:50]} (ChromeDriver版本可能与Chrome不匹配)", "error")
+        logger.error(f"SessionNotCreatedException: {sne}", exc_info=True)
+        if sys.platform == "win32":
+            tk.Tk().withdraw()  # 隐藏主窗口
+            messagebox.showerror(
+                "浏览器初始化失败",
+                f"错误详情：{str(sne)[:100]}\n\n可能原因：ChromeDriver版本与本地Chrome浏览器版本不兼容。\n请确保内置的chromedriver.exe版本与您本地安装的Chrome浏览器版本兼容。"
+            )
+    except FileNotFoundError as fnf:
+        update_status(f"浏览器初始化失败：{fnf}", "error")
+        logger.error(f"FileNotFoundError: {fnf}", exc_info=True)
+        if sys.platform == "win32":
+            tk.Tk().withdraw()  # 隐藏主窗口
+            messagebox.showerror(
+                "浏览器初始化失败",
+                f"错误详情：{fnf}\n\n内置的ChromeDriver文件未找到。请确保chromedriver.exe与此程序在同一目录下。"
+            )
     except Exception as e:
-        update_status(f"浏览器初始化失败：{str(e)[:30]}", "error")
+        update_status(f"浏览器初始化彻底失败：{str(e)[:50]}", "error")
         logger.error(f"浏览器初始化出错：{e}", exc_info=True)
+        # 弹出错误提示框
+        if sys.platform == "win32":
+            tk.Tk().withdraw()  # 隐藏主窗口
+            messagebox.showerror(
+                "浏览器初始化失败",
+                f"错误详情：{str(e)[:100]}\n\n请确保Chrome浏览器已安装并可正常打开。"
+            )
 
 
 def auto_exam_task():
@@ -987,7 +1179,7 @@ class FloatingWindow:
             self.log_text.delete("1.0", "2.0")
         self.log_text.insert(tk.END, f"{time.strftime('%H:%M:%S')} - {msg}\n")
         self.log_text.see(tk.END)
-        self.log_text.config(state=tk.DISABLED)
+        self.log_text.config(state=tk.NORMAL)
 
     def clear_log(self):
         """清空日志"""
@@ -1034,12 +1226,77 @@ class FloatingWindow:
             self.root.destroy()
 
 
+# ===================== 新增：使用须知弹窗 =====================
+def show_usage_notice():
+    """显示工具使用须知弹窗，必须点击知道啦才能继续"""
+    # 创建主窗口（隐藏，仅作为弹窗父级）
+    notice_root = tk.Tk()
+    notice_root.withdraw()  # 隐藏主窗口
+
+    # 创建须知弹窗
+    notice_win = tk.Toplevel(notice_root)
+    notice_win.title("工具使用须知")
+    notice_win.geometry("420x290")
+    notice_win.resizable(False, False)
+    notice_win.attributes("-topmost", True)  # 置顶显示
+    notice_win.protocol("WM_DELETE_WINDOW", lambda: None)  # 禁止关闭按钮
+
+    # 设置弹窗居中
+    notice_win.update_idletasks()
+    x = (notice_win.winfo_screenwidth() - notice_win.winfo_width()) // 2
+    y = (notice_win.winfo_screenheight() - notice_win.winfo_height()) // 2
+    notice_win.geometry(f"+{x}+{y}")
+
+    # 标题标签
+    title_label = ttk.Label(
+        notice_win,
+        text="工具使用须知",
+        font=("Arial", 12, "bold")
+    )
+    title_label.pack(pady=10)
+
+    # 须知内容
+    content_text = """工具不是完美的，目前已知问题：
+1. API调用超时，原则上是模型大小的问题，作者调用的是小模型测试的，使用者可以切换其他大模型
+2. 作答选项选择不全，本质也跟模型输出的结果有关，其实不影响使用，有漏答，也可以及格压线通过
+3. 就算没有漏答，不及格，跟模型有关，模型会重复学习，会通关的，给AI一些时间^_^"""
+
+    content_label = ttk.Label(
+        notice_win,
+        text=content_text,
+        font=("Arial", 10),
+        justify=tk.LEFT,
+        wraplength=360
+    )
+    content_label.pack(pady=5, padx=30)
+
+    # 知道啦按钮
+    def on_confirm():
+        notice_win.destroy()
+        notice_root.destroy()
+
+    confirm_btn = ttk.Button(
+        notice_win,
+        text="知道啦",
+        command=on_confirm,
+        width=10
+    )
+    confirm_btn.pack(pady=10)
+
+    # 等待弹窗关闭
+    notice_win.mainloop()
+
+
 # ===================== 主函数 =====================
 if __name__ == "__main__":
+    # 第一步：显示使用须知弹窗
+    show_usage_notice()
+
     # 隐藏控制台（可选，注释掉则显示控制台）
     # if sys.platform == "win32":
     #     ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
 
+    # 第二步：初始化主悬浮窗
     root = tk.Tk()
     app = FloatingWindow(root)
     root.mainloop()
