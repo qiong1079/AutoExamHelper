@@ -77,6 +77,11 @@ export WDM_LOCAL=1
 ```bash
 python auto_exam.py
 ```
+
+### 5. 打包可执行程序
+```bash
+pyinstaller --add-data "chromedriver.exe;." --onefile .\auto_exam_doubao_batch.py
+```
 ## 使用说明
 ### 1. 初始化阶段
 1. 启动程序后，会自动初始化 Chrome 浏览器并打开目标考试网站
@@ -163,4 +168,5 @@ python auto_exam.py
 - 如有问题或建议，欢迎提交 Issue
 - 欢迎 Fork 并提交 Pull Request 改进代码
 ## 📜 许可证
+
 本项目采用 MIT 许可证开源，详见 LICENSE 文件。
